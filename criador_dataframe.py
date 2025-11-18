@@ -1,23 +1,27 @@
 import pandas as pd
 from pyadomd import Pyadomd
-import sqlalchemy
+import logging
+
+logger = logging.getLogger("logger_financa")
 
 class CriadorDataFrame:
     def __init__(self, funcao_conexao, conexao: str, consulta: str, tipo: str = "sql"):
         self.funcao_conexao = funcao_conexao
-        self.conexao = conexao
+        self.conexao_nome = conexao
         self.consulta = consulta
         self.tipo = tipo.lower()
 
     def executar(self) -> pd.DataFrame:
         try:
-            info_conexao = self.funcao_conexao(self.conexao)
+            # A engine/string de conexão é obtida pela função passada
+            info_conexao = self.funcao_conexao(self.conexao_nome)
 
             if self.tipo in ("sql", "azure_sql"):
-                # Execute a consulta inteira, sem split, para garantir que DECLARE @DT funcione
+                # info_conexao aqui é uma engine SQLAlchemy
                 return pd.read_sql_query(self.consulta, info_conexao)
 
             elif self.tipo == "mdx":
+                # info_conexao aqui é a string de conexão OLAP
                 with Pyadomd(info_conexao) as conexao:
                     with conexao.cursor() as cursor:
                         cursor.execute(self.consulta)
@@ -29,18 +33,7 @@ class CriadorDataFrame:
                 raise ValueError(f"Tipo de consulta '{self.tipo}' não suportado.")
 
         except Exception as erro:
-            print(f"Erro ao executar a consulta ({self.tipo}): {erro}")
+            logger.error(f"Erro ao executar a consulta (Tipo: {self.tipo}, Conexão: {self.conexao_nome}): {erro}")
+            logger.error(traceback.format_exc())
             return pd.DataFrame()
 
-    def salva_no_Financa(self, df, table_name):
-        """
-        Salva um DataFrame no SQL Server no servidor SPSVSQL39, banco FINANCA.
-        """
-        try:
-            # Usa sempre a conexão SPSVSQL39 para salvar
-            from conexao.funcoes_globais import funcao_conexao
-            engine = funcao_conexao("SPSVSQL39")
-            df.to_sql(name=table_name, con=engine, if_exists='replace', index=False)
-            print(f"Dados salvos com sucesso na tabela {table_name}.")
-        except Exception as e:
-            print(f"Erro ao salvar no SQL: {e}")
