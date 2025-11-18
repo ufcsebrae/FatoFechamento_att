@@ -138,6 +138,7 @@ def salvar_no_financa(df: pd.DataFrame, table_name: str):
         # Chama a função 'funcao_conexao' que já está neste arquivo
         engine = funcao_conexao("SPSVSQL39")
         df.to_sql(name=table_name, con=engine, if_exists='replace', index=False)
+        return True
 
         fim = time.perf_counter()
         tempo = fim - inicio

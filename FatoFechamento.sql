@@ -1,4 +1,6 @@
 
+DROP TABLE IF EXISTS FatoFechamento_v2;
+
 
 WITH
 -- CTE 1: Lista de contas contábeis de interesse.
