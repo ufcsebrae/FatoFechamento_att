@@ -176,6 +176,7 @@ def salvar_no_financa(df: pd.DataFrame, table_name: str):
             
             df.to_sql(
                 name=table_name,
+                schema='dbo',
                 con=connection,
                 if_exists='append',
                 index=False,
