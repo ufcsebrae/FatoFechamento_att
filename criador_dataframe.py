@@ -1,39 +1,34 @@
+# criador_dataframe.py
+
 import pandas as pd
-from pyadomd import Pyadomd
 import logging
 
+# Obtém o logger configurado em main.py
 logger = logging.getLogger("logger_financa")
 
 class CriadorDataFrame:
-    def __init__(self, funcao_conexao, conexao: str, consulta: str, tipo: str = "sql"):
+    def __init__(self, funcao_conexao, conexao_nome, consulta, tipo):
         self.funcao_conexao = funcao_conexao
-        self.conexao_nome = conexao
+        self.conexao_nome = conexao_nome
         self.consulta = consulta
-        self.tipo = tipo.lower()
+        self.tipo = tipo
 
     def executar(self) -> pd.DataFrame:
+        """
+        Executa a consulta de leitura (SELECT) e retorna um DataFrame.
+        """
         try:
-            # A engine/string de conexão é obtida pela função passada
-            info_conexao = self.funcao_conexao(self.conexao_nome)
-
-            if self.tipo in ("sql", "azure_sql"):
-                # info_conexao aqui é uma engine SQLAlchemy
-                return pd.read_sql_query(self.consulta, info_conexao)
-
-            elif self.tipo == "mdx":
-                # info_conexao aqui é a string de conexão OLAP
-                with Pyadomd(info_conexao) as conexao:
-                    with conexao.cursor() as cursor:
-                        cursor.execute(self.consulta)
-                        dados = cursor.fetchall()
-                        colunas = [col.name for col in cursor.description]
-                        return pd.DataFrame(dados, columns=colunas)
-
+            # Obtém uma engine de conexão
+            engine = self.funcao_conexao(self.conexao_nome)
+            
+            if self.tipo == "sql":
+                # pd.read_sql_query é para executar SELECTs.
+                return pd.read_sql_query(self.consulta, engine)
             else:
-                raise ValueError(f"Tipo de consulta '{self.tipo}' não suportado.")
+                raise NotImplementedError(f"O tipo de consulta '{self.tipo}' não está implementado.")
 
-        except Exception as erro:
-            logger.error(f"Erro ao executar a consulta (Tipo: {self.tipo}, Conexão: {self.conexao_nome}): {erro}")
-            logger.error(traceback.format_exc())
-            return pd.DataFrame()
-
+        except Exception as e:
+            # Se a leitura falhar (ex: timeout mesmo com o valor alto), loga e levanta a exceção
+            logger.error(f"Erro final dentro do CriadorDataFrame ao ler a consulta SQL.", exc_info=True)
+            # Levanta a exceção para que 'selecionar_consulta_por_nome' possa tratá-la.
+            raise e
