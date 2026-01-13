@@ -1,4 +1,4 @@
-# funcoes_globais.py (versão com transação por chunk)
+# funcoes_globais.py (versão final com retry de blocos)
 
 import logging
 import time
@@ -63,7 +63,7 @@ def funcao_conexao(nome_conexao: str, tentativas: int = 3, delay_segundos: int =
 
 def selecionar_consulta_por_nome(titulo: str) -> pd.DataFrame:
     """Executa a consulta pelo nome e retorna um DataFrame."""
-    # (Esta função permanece a mesma da versão anterior)
+    # Esta função não precisa mais de lógica de retry, pois a causa do erro foi identificada.
     logger.info(f"▶️ Executando a consulta: '{titulo}'...")
     inicio = time.perf_counter()
     try:
@@ -93,18 +93,20 @@ def selecionar_consulta_por_nome(titulo: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def salvar_no_financa(df: pd.DataFrame, table_name: str):
+def salvar_no_financa(df: pd.DataFrame, table_name: str, retries_por_chunk: int = 2):
     """
-    Salva um DataFrame no SQL Server usando uma transação por chunk para 
-    máxima resiliência contra timeouts de rede.
+    Salva o DataFrame de forma resiliente. Tenta salvar cada bloco e, se falhar,
+    guarda para uma segunda rodada de tentativas no final.
     """
     if df.empty:
-        logger.warning(f"⚠️ DataFrame está vazio. Nada será salvo na tabela '{table_name}'.")
+        logger.warning(f"⚠️ DataFrame está vazio. Nada será salvo.")
         return
 
     logger.info(f"📀 Iniciando processo de salvamento para a tabela '{table_name}'.")
-    inicio = time.perf_counter()
+    inicio_total = time.perf_counter()
     engine = None
+    blocos_falhos = [] # Lista para guardar os blocos que falharam
+
     try:
         engine = funcao_conexao("SPSVSQL39")
         
@@ -112,36 +114,60 @@ def salvar_no_financa(df: pd.DataFrame, table_name: str):
         num_colunas = len(df.columns)
         chunksize = (SQL_SERVER_PARAM_LIMIT // num_colunas) if num_colunas > 0 else 1000
         
-        logger.info(f"⚙️ Tabela com {num_colunas} colunas. Chunksize dinâmico calculado: {chunksize} linhas por bloco.")
-        
         total_rows = len(df)
         num_chunks = math.ceil(total_rows / chunksize)
         
-        # Primeiro, apaga a tabela em uma transação separada.
         with engine.begin() as connection:
-            logger.info(f"🗑️ Removendo a tabela antiga '{table_name}' (se existir)...")
+            logger.info(f"🗑️ Removendo a tabela antiga '{table_name}'...")
             connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
             logger.info(f"✅ Tabela removida.")
             
-        logger.info(f"💾 Salvando {total_rows} linhas em {num_chunks} blocos...")
+        logger.info(f"💾 Iniciando 1ª rodada: salvando {total_rows} linhas em {num_chunks} blocos...")
         chunks = np.array_split(df, num_chunks)
 
-        # --- MUDANÇA PRINCIPAL: TRANSAÇÃO DENTRO DO LOOP ---
         for i, chunk_df in enumerate(chunks):
             bloco_atual = i + 1
-            # Para cada bloco, abrimos uma nova transação.
-            # Isso força o pool a nos dar uma conexão "fresca" ou testada.
-            with engine.begin() as connection:
-                logger.info(f"  -> Salvando bloco {bloco_atual}/{num_chunks} ({len(chunk_df)} linhas)...")
-                chunk_df.to_sql(name=table_name, con=connection, if_exists='append', index=False, method='multi')
-        # ---------------------------------------------------
+            try:
+                with engine.begin() as connection:
+                    logger.info(f"  -> 1ª Tentativa: Salvando bloco {bloco_atual}/{num_chunks}...")
+                    chunk_df.to_sql(name=table_name, con=connection, if_exists='append', index=False, method='multi')
+            except pyodbc.OperationalError as e:
+                if '08S01' in str(e):
+                    logger.warning(f"  ⚠️ Falha de comunicação no bloco {bloco_atual}. Adicionando à lista para retentativa.")
+                    blocos_falhos.append((bloco_atual, chunk_df))
+                else:
+                    logger.error(f"  ❌ Erro de banco de dados não recuperável no bloco {bloco_atual}.", exc_info=True)
+                    raise e # Falha imediatamente se o erro não for de comunicação
+        
+        # --- SEGUNDA RODADA: TENTA SALVAR NOVAMENTE OS BLOCOS QUE FALHARAM ---
+        if blocos_falhos:
+            logger.warning(f"--- Iniciando 2ª rodada para {len(blocos_falhos)} blocos que falharam ---")
+            blocos_com_falha_permanente = []
             
-        fim = time.perf_counter()
-        tempo = fim - inicio
-        logger.info(f"🎉 Sucesso! {total_rows} linhas salvas na tabela '{table_name}' em {tempo:.2f} segundos.")
+            for bloco_num, chunk_df in blocos_falhos:
+                try:
+                    with engine.begin() as connection:
+                        logger.info(f"  -> 2ª Tentativa: Salvando bloco {bloco_num}...")
+                        chunk_df.to_sql(name=table_name, con=connection, if_exists='append', index=False, method='multi')
+                    logger.info(f"  ✅ Sucesso na 2ª tentativa para o bloco {bloco_num}.")
+                except Exception as e:
+                    logger.error(f"  ❌ FALHA PERMANENTE no bloco {bloco_num} mesmo na 2ª tentativa.", exc_info=True)
+                    blocos_com_falha_permanente.append(bloco_num)
+
+            if blocos_com_falha_permanente:
+                # Se ainda houver falhas, levanta uma exceção para que a 'main' saiba que o processo não foi 100%
+                raise RuntimeError(f"Não foi possível salvar os seguintes blocos: {blocos_com_falha_permanente}")
+
+        fim_total = time.perf_counter()
+        tempo_total = fim_total - inicio_total
+        
+        if blocos_falhos and not blocos_com_falha_permanente:
+             logger.info(f"🎉 Sucesso! Todos os {total_rows} foram salvos, com algumas retentativas, em {tempo_total:.2f} segundos.")
+        else:
+             logger.info(f"🎉 Sucesso! Todos os {total_rows} foram salvos na primeira rodada em {tempo_total:.2f} segundos.")
 
     except Exception as e:
-        logger.error(f"❌ Erro ao salvar no SQL para a tabela '{table_name}'.", exc_info=True)
+        logger.error(f"❌ O processo de salvamento falhou. Causa: {e}", exc_info=True)
         raise e
     finally:
         if engine:
