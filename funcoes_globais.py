@@ -1,4 +1,4 @@
-# funcoes_globais.py (versão final com retry de blocos)
+# funcoes_globais.py (versão final com retry de blocos em duas rodadas)
 
 import logging
 import time
@@ -19,7 +19,8 @@ from criador_dataframe import CriadorDataFrame
 
 def funcao_conexao(nome_conexao: str, tentativas: int = 3, delay_segundos: int = 10) -> create_engine:
     """
-    Cria uma engine com retry, timeout de query e reciclagem de conexão.
+    Cria uma engine com retry para falhas de conexão inicial,
+    timeout de query longo e reciclagem de conexão.
     """
     for tentativa in range(tentativas):
         try:
@@ -35,7 +36,7 @@ def funcao_conexao(nome_conexao: str, tentativas: int = 3, delay_segundos: int =
                 odbc_str = f"DRIVER={{{driver}}};SERVER={servidor};DATABASE={banco};{trusted_str};timeout=600"
             
             elif tipo_conexao == "olap":
-                return info["str_conexao"]
+                return info["str_conexao"] # Conexões OLAP podem ter um tratamento diferente
             else:
                 raise ValueError(f"Tipo de conexão '{tipo_conexao}' não suportado.")
 
@@ -44,7 +45,7 @@ def funcao_conexao(nome_conexao: str, tentativas: int = 3, delay_segundos: int =
             engine = create_engine(
                 string_conexao, 
                 pool_pre_ping=True, 
-                pool_recycle=300
+                pool_recycle=300 # Recicla conexões mais antigas que 5 minutos
             )
             
             with engine.connect() as connection:
@@ -57,13 +58,15 @@ def funcao_conexao(nome_conexao: str, tentativas: int = 3, delay_segundos: int =
                 time.sleep(delay_segundos)
             else:
                 logger.error(f"Erro final de conexão na tentativa {tentativa + 1}.", exc_info=True)
-                raise e
+                raise e # Levanta o erro na última tentativa ou se não for erro de comunicação
+        except Exception as e:
+            logger.error(f"Erro inesperado ao criar engine de conexão: {e}", exc_info=True)
+            raise e
     raise ConnectionError(f"Não foi possível conectar a '{nome_conexao}' após {tentativas} tentativas.")
 
 
 def selecionar_consulta_por_nome(titulo: str) -> pd.DataFrame:
     """Executa a consulta pelo nome e retorna um DataFrame."""
-    # Esta função não precisa mais de lógica de retry, pois a causa do erro foi identificada.
     logger.info(f"▶️ Executando a consulta: '{titulo}'...")
     inicio = time.perf_counter()
     try:
@@ -93,10 +96,12 @@ def selecionar_consulta_por_nome(titulo: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def salvar_no_financa(df: pd.DataFrame, table_name: str, retries_por_chunk: int = 2):
+def salvar_no_financa(df: pd.DataFrame, table_name: str, retries_per_chunk: int = 3):
     """
-    Salva o DataFrame de forma resiliente. Tenta salvar cada bloco e, se falhar,
-    guarda para uma segunda rodada de tentativas no final.
+    Salva o DataFrame no SQL Server usando duas rodadas de tentativas para blocos.
+    Se um bloco falhar na primeira rodada (mesmo após retries internos),
+    ele é adicionado a uma lista para uma segunda rodada de tentativas.
+    O processo não é interrompido por falhas individuais de blocos.
     """
     if df.empty:
         logger.warning(f"⚠️ DataFrame está vazio. Nada será salvo.")
@@ -105,7 +110,9 @@ def salvar_no_financa(df: pd.DataFrame, table_name: str, retries_por_chunk: int 
     logger.info(f"📀 Iniciando processo de salvamento para a tabela '{table_name}'.")
     inicio_total = time.perf_counter()
     engine = None
-    blocos_falhos = [] # Lista para guardar os blocos que falharam
+    
+    # Lista para guardar os blocos que falharam persistentemente na 1ª rodada
+    blocos_com_falha_persistente_primeira_rodada = [] 
 
     try:
         engine = funcao_conexao("SPSVSQL39")
@@ -117,58 +124,82 @@ def salvar_no_financa(df: pd.DataFrame, table_name: str, retries_por_chunk: int 
         total_rows = len(df)
         num_chunks = math.ceil(total_rows / chunksize)
         
+        # --- ETAPA 1: Remover a tabela antiga ---
         with engine.begin() as connection:
-            logger.info(f"🗑️ Removendo a tabela antiga '{table_name}'...")
+            logger.info(f"🗑️ Removendo a tabela antiga '{table_name}' (se existir)...")
             connection.execute(text(f'DROP TABLE IF EXISTS "{table_name}"'))
             logger.info(f"✅ Tabela removida.")
             
-        logger.info(f"💾 Iniciando 1ª rodada: salvando {total_rows} linhas em {num_chunks} blocos...")
+        logger.info(f"💾 Iniciando 1ª RODADA: Salvando {total_rows} linhas em {num_chunks} blocos.")
         chunks = np.array_split(df, num_chunks)
 
+        # --- ETAPA 2: Primeira tentativa de salvamento de todos os blocos ---
         for i, chunk_df in enumerate(chunks):
             bloco_atual = i + 1
-            try:
-                with engine.begin() as connection:
-                    logger.info(f"  -> 1ª Tentativa: Salvando bloco {bloco_atual}/{num_chunks}...")
-                    chunk_df.to_sql(name=table_name, con=connection, if_exists='append', index=False, method='multi')
-            except pyodbc.OperationalError as e:
-                if '08S01' in str(e):
-                    logger.warning(f"  ⚠️ Falha de comunicação no bloco {bloco_atual}. Adicionando à lista para retentativa.")
-                    blocos_falhos.append((bloco_atual, chunk_df))
-                else:
-                    logger.error(f"  ❌ Erro de banco de dados não recuperável no bloco {bloco_atual}.", exc_info=True)
-                    raise e # Falha imediatamente se o erro não for de comunicação
-        
-        # --- SEGUNDA RODADA: TENTA SALVAR NOVAMENTE OS BLOCOS QUE FALHARAM ---
-        if blocos_falhos:
-            logger.warning(f"--- Iniciando 2ª rodada para {len(blocos_falhos)} blocos que falharam ---")
-            blocos_com_falha_permanente = []
+            tentativas_chunk_atual = 0
+            sucesso_chunk_atual = False
             
-            for bloco_num, chunk_df in blocos_falhos:
+            while not sucesso_chunk_atual and tentativas_chunk_atual < retries_per_chunk:
                 try:
                     with engine.begin() as connection:
-                        logger.info(f"  -> 2ª Tentativa: Salvando bloco {bloco_num}...")
+                        if tentativas_chunk_atual > 0:
+                             logger.info(f"  -> Retentando bloco {bloco_atual}/{num_chunks} (Tentativa {tentativas_chunk_atual + 1}/{retries_per_chunk} interna)...")
+                        else:
+                             logger.info(f"  -> Salvando bloco {bloco_atual}/{num_chunks} ({len(chunk_df)} linhas)...")
+                        
                         chunk_df.to_sql(name=table_name, con=connection, if_exists='append', index=False, method='multi')
-                    logger.info(f"  ✅ Sucesso na 2ª tentativa para o bloco {bloco_num}.")
-                except Exception as e:
-                    logger.error(f"  ❌ FALHA PERMANENTE no bloco {bloco_num} mesmo na 2ª tentativa.", exc_info=True)
-                    blocos_com_falha_permanente.append(bloco_num)
+                        sucesso_chunk_atual = True
+                
+                except pyodbc.OperationalError as e:
+                    tentativas_chunk_atual += 1
+                    if '08S01' in str(e): # Apenas para falha de comunicação
+                        logger.warning(f"  ⚠️ Falha de comunicação no bloco {bloco_atual}. Tentativa {tentativas_chunk_atual}/{retries_per_chunk}.")
+                        if tentativas_chunk_atual < retries_per_chunk:
+                            time.sleep(5) # Pequena pausa antes da retentativa interna
+                        else:
+                            logger.error(f"  ❌ Bloco {bloco_atual} falhou após {retries_per_chunk} retentativas internas.")
+                            # Adiciona à lista de falhas para a 2ª rodada e sai do loop while
+                            blocos_com_falha_persistente_primeira_rodada.append((bloco_atual, chunk_df))
+                            break 
+                    else:
+                        # Se for outro erro operacional, re-raise imediatamente
+                        logger.error(f"  ❌ Erro operacional não recuperável no bloco {bloco_atual}.", exc_info=True)
+                        raise e
+                except Exception as e: # Captura outros erros inesperados para este chunk
+                    logger.error(f"  ❌ Erro inesperado ao salvar bloco {bloco_atual}.", exc_info=True)
+                    raise e
 
-            if blocos_com_falha_permanente:
-                # Se ainda houver falhas, levanta uma exceção para que a 'main' saiba que o processo não foi 100%
-                raise RuntimeError(f"Não foi possível salvar os seguintes blocos: {blocos_com_falha_permanente}")
+        # --- ETAPA 3: Segunda rodada (retry) para blocos que falharam persistentemente na 1ª ---
+        if blocos_com_falha_persistente_primeira_rodada:
+            logger.warning(f"--- Iniciando 2ª RODADA para {len(blocos_com_falha_persistente_primeira_rodada)} blocos que falharam persistentemente na 1ª Rodada ---")
+            blocos_com_falha_final = []
+            
+            for bloco_num, chunk_df_failed in blocos_com_falha_persistente_primeira_rodada:
+                try:
+                    with engine.begin() as connection:
+                        logger.info(f"  -> 2ª Rodada: Retentando bloco {bloco_num}...")
+                        chunk_df_failed.to_sql(name=table_name, con=connection, if_exists='append', index=False, method='multi')
+                    logger.info(f"  ✅ Sucesso na 2ª Rodada para o bloco {bloco_num}.")
+                except Exception as e:
+                    logger.error(f"  ❌ FALHA FINAL no bloco {bloco_num} mesmo após a 2ª Rodada.", exc_info=True)
+                    blocos_com_falha_final.append(bloco_num)
+
+            if blocos_com_falha_final:
+                # Se ainda houver falhas, levanta uma exceção para que a 'main' reporte o status parcial.
+                raise RuntimeError(f"Não foi possível salvar os seguintes blocos mesmo após a 2ª Rodada: {blocos_com_falha_final}")
 
         fim_total = time.perf_counter()
         tempo_total = fim_total - inicio_total
         
-        if blocos_falhos and not blocos_com_falha_permanente:
-             logger.info(f"🎉 Sucesso! Todos os {total_rows} foram salvos, com algumas retentativas, em {tempo_total:.2f} segundos.")
+        if blocos_com_falha_persistente_primeira_rodada and not blocos_com_falha_final:
+             logger.info(f"🎉 Sucesso total! Todos os {total_rows} foram salvos, com retentativas na 1ª e 2ª rodadas, em {tempo_total:.2f} segundos.")
         else:
-             logger.info(f"🎉 Sucesso! Todos os {total_rows} foram salvos na primeira rodada em {tempo_total:.2f} segundos.")
+             logger.info(f"🎉 Sucesso! Todos os {total_rows} foram salvos na 1ª Rodada em {tempo_total:.2f} segundos.")
 
     except Exception as e:
         logger.error(f"❌ O processo de salvamento falhou. Causa: {e}", exc_info=True)
-        raise e
+        raise e # Re-raise para que a função main possa capturar e enviar o e-mail de falha.
     finally:
         if engine:
             engine.dispose()
+
