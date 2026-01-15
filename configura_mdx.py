@@ -4,7 +4,7 @@ import clr
 
 # --- Caminho da DLL conforme a imagem ---
 # O 'r' antes da string garante que as barras invertidas sejam lidas corretamente.
-dll_path = r"C:\Arquivos de Programas\On-premises data gateway\Microsoft.AnalysisServices.AdomdClient.dll"
+dll_path = r"C:\Users\cesargl\Downloads\adomdclient\adomdclient.dll"
 
 # 1. Verifica se o arquivo da DLL realmente existe no caminho fornecido
 if not os.path.exists(dll_path):

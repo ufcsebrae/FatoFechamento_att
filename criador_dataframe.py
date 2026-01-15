@@ -1,5 +1,3 @@
-# criador_dataframe.py
-
 import pandas as pd
 import logging
 
@@ -17,18 +15,21 @@ class CriadorDataFrame:
         """
         Executa a consulta de leitura (SELECT) e retorna um DataFrame.
         """
+        engine = None
         try:
             # Obtém uma engine de conexão
             engine = self.funcao_conexao(self.conexao_nome)
+            if not engine:
+                 raise ConnectionError(f"A função de conexão não retornou uma engine para '{self.conexao_nome}'.")
             
             if self.tipo == "sql":
-                # pd.read_sql_query é para executar SELECTs.
                 return pd.read_sql_query(self.consulta, engine)
             else:
                 raise NotImplementedError(f"O tipo de consulta '{self.tipo}' não está implementado.")
-
+                
         except Exception as e:
-            # Se a leitura falhar (ex: timeout mesmo com o valor alto), loga e levanta a exceção
             logger.error(f"Erro final dentro do CriadorDataFrame ao ler a consulta SQL.", exc_info=True)
-            # Levanta a exceção para que 'selecionar_consulta_por_nome' possa tratá-la.
             raise e
+        finally:
+             if engine:
+                  engine.dispose()
