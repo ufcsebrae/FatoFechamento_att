@@ -1,8 +1,3 @@
-<<<<<<< HEAD
-=======
-# funcoes_globais.py (versão final com retry de blocos em duas rodadas)
-
->>>>>>> 082af27ad1d2d4621840109352dfd929320ca4b9
 import logging
 import time
 import pandas as pd
@@ -26,7 +21,6 @@ def funcao_conexao(
     nome_conexao: str, tentativas: int = 3, delay_segundos: int = 10
 ) -> Optional[engine.Engine]:
     """
-<<<<<<< HEAD
     Cria uma engine SQLAlchemy com lógica de retry e configuração de segurança.
 
     Esta função constrói a string de conexão ODBC, incluindo os parâmetros
@@ -40,10 +34,6 @@ def funcao_conexao(
 
     Returns:
         Um objeto sqlalchemy.engine.Engine ou None se a conexão falhar.
-=======
-    Cria uma engine com retry para falhas de conexão inicial,
-    timeout de query longo e reciclagem de conexão.
->>>>>>> 082af27ad1d2d4621840109352dfd929320ca4b9
     """
     info = CONEXOES.get(nome_conexao)
     if not info:
@@ -87,35 +77,10 @@ def funcao_conexao(
     # --- Lógica de Retry ---
     for tentativa in range(tentativas):
         try:
-<<<<<<< HEAD
             engine_instance = create_engine(
                 string_conexao_url,
                 pool_pre_ping=True,
                 pool_recycle=300
-=======
-            info = CONEXOES[nome_conexao]
-            tipo_conexao = info.get("tipo")
-            
-            odbc_str = ""
-            if tipo_conexao == "sql":
-                servidor = info["servidor"]
-                banco = info["banco"]
-                driver = info["driver"].replace('+', ' ')
-                trusted_str = "Trusted_Connection=yes;" if info.get("trusted_connection", False) else ""
-                odbc_str = f"DRIVER={{{driver}}};SERVER={servidor};DATABASE={banco};{trusted_str};timeout=600"
-            
-            elif tipo_conexao == "olap":
-                return info["str_conexao"] # Conexões OLAP podem ter um tratamento diferente
-            else:
-                raise ValueError(f"Tipo de conexão '{tipo_conexao}' não suportado.")
-
-            string_conexao = f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc_str)}"
-            
-            engine = create_engine(
-                string_conexao, 
-                pool_pre_ping=True, 
-                pool_recycle=300 # Recicla conexões mais antigas que 5 minutos
->>>>>>> 082af27ad1d2d4621840109352dfd929320ca4b9
             )
             
             # Testa a conexão para validar a engine
