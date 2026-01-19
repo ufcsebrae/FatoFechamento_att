@@ -135,18 +135,11 @@ def funcao_conexao(
             else:
                 # Se for outro OperationalError (como o de SSL) ou a última tentativa
                 logger.error(f"Erro final de conexão na tentativa {tentativa + 1}.", exc_info=True)
-<<<<<<< HEAD
                 raise e # Levanta o erro original para análise
         except Exception as e:
             logger.error(f"Erro inesperado ao criar a engine para '{nome_conexao}'.", exc_info=True)
             raise e
 
-=======
-                raise e # Levanta o erro na última tentativa ou se não for erro de comunicação
-        except Exception as e:
-            logger.error(f"Erro inesperado ao criar engine de conexão: {e}", exc_info=True)
-            raise e
->>>>>>> 082af27ad1d2d4621840109352dfd929320ca4b9
     raise ConnectionError(f"Não foi possível conectar a '{nome_conexao}' após {tentativas} tentativas.")
 
 
