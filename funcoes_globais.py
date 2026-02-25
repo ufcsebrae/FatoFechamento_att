@@ -164,7 +164,7 @@ def salvar_no_financa(df: pd.DataFrame, table_name: str, retries_per_chunk: int 
                              logger.info(f"  -> Salvando bloco {bloco_atual}/{num_chunks} ({len(chunk_df)} linhas)...")
                         
                         # Removido 'method=multi' para deixar o fast_executemany atuar
-                        chunk_df.to_sql(name=table_name, con=connection, if_exists='append', index=False)
+                        chunk_df.to_sql(name=table_name, con=connection, if_exists='append', index=False, schema='dbo')
                         sucesso_chunk_atual = True
                 
                 except pyodbc.OperationalError as e:
